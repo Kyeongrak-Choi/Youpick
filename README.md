@@ -10,6 +10,7 @@
 - Shorts(기본값: 60초 이하)를 제외하고 시간 제한을 만족하는 영상만 남긴다.
 - 역할이 분리된 에이전트를 FastAPI 오케스트레이터가 순서대로 실행한다.
 - 같은 조건의 반복 요청은 Redis 캐시로 YouTube API 호출을 줄인다.
+- 사이드바에서 YouTube API의 앱 기준 예상 잔여 할당량을 확인한다.
 - 검색 이력과 피드백은 Supabase(PostgreSQL)에 저장해 이후 고도화에 활용한다.
 
 ## 기술 스택
@@ -110,24 +111,61 @@ Youpick/
 - Supabase 테이블 후보:
   - `search_requests`: 입력 조건, 요청 시각, 처리 시간, 캐시 히트 여부
   - `recommendations`: 요청별 추천 영상과 순위, 점수, 추천 이유
-  - `feedback`: 추천 결과에 대한 유용함 평가와 선택 이유
+- `feedback`: 추천 결과에 대한 유용함 평가와 선택 이유
 - 비밀 값(YouTube API 키, Supabase 키)은 `.env`에만 저장하며 Git에 올리지 않는다.
+
+Supabase 영속화 스키마는 [001_initial_schema.sql](backend/supabase/migrations/001_initial_schema.sql)에 있습니다. Supabase SQL Editor에서 한 번 실행한 후 `backend/.env`에 `SUPABASE_URL`과 `SUPABASE_SECRET_KEY`를 설정하면, 추천 요청과 결과가 자동으로 저장됩니다. 기존 `SUPABASE_SERVICE_ROLE_KEY`도 호환되지만 새 프로젝트에서는 Secret key 사용을 권장합니다. 이 키는 백엔드에서만 사용하며 Streamlit 등 프론트엔드에는 절대 전달하지 않습니다.
+
+추천 결과의 유용함 평가는 `POST /api/v1/feedback`으로 보냅니다. 사용 전에 [002_feedback.sql](backend/supabase/migrations/002_feedback.sql)을 SQL Editor에서 실행해야 합니다.
+
+```json
+{
+  "recommendation_id": "추천 결과의 UUID",
+  "is_helpful": true,
+  "comment": "실습에 도움이 됐어요."
+}
+```
 
 ## 환경 변수
 
-`.env.example`을 복사해 `.env`를 만든 후 실제 값을 입력합니다.
+`backend/.env.example`을 복사해 `backend/.env`를 만든 후 실제 값을 입력합니다.
 
 ```bash
-cp .env.example .env
+cp backend/.env.example backend/.env
 ```
 
 | 변수 | 설명 |
 | --- | --- |
 | `YOUTUBE_API_KEY` | YouTube Data API v3 키 |
+| `YOUTUBE_DAILY_QUOTA_LIMIT` | 일일 할당량 기준값. 기본값은 10,000유닛 |
+| `GOOGLE_OAUTH_CLIENT_ID` | Google 로그인용 OAuth Client ID. Streamlit 설정과 같은 값 |
 | `SUPABASE_URL` | Supabase 프로젝트 URL |
 | `SUPABASE_KEY` | Supabase 서버용 키 |
 | `REDIS_URL` | Redis 연결 URL. 예: `redis://localhost:6379/0` |
 | `BACKEND_URL` | Streamlit이 호출할 FastAPI 주소 |
+
+`backend/.env`의 `CORS_ORIGINS`에는 브라우저에서 API를 호출할 프론트엔드 주소를 쉼표로 구분해 설정합니다. 로컬 Streamlit 기본 주소는 이미 예시에 포함되어 있습니다.
+
+### YouTube API 잔여 할당량
+
+YouTube Data API는 API 응답에 남은 일일 할당량을 직접 제공하지 않습니다. 따라서 YouPick은 앱이 발생시킨 `search.list` 호출은 100유닛, `videos.list` 호출은 1유닛으로 누적해 사이드바에 **예상 잔여량**을 표시합니다. Redis를 설정했다면 서버 재시작 뒤에도 같은 날의 사용량이 유지됩니다. Google Cloud Console, 다른 앱 또는 직접 실행한 호출은 포함되지 않으므로 Console의 실제 수치와 차이가 날 수 있습니다. 기준 일자는 YouTube의 일일 쿼터가 초기화되는 미국 태평양 시간입니다.
+
+### Google 로그인과 계정별 대화 이력
+
+YouPick은 Streamlit의 Google OIDC 로그인으로 받은 Google ID 토큰을 FastAPI가 검증하고, Google 계정의 고유 식별자(`sub`)로 Supabase 이력을 분리합니다. 비밀 값은 Git에 올리지 않습니다.
+
+1. Google Cloud Console의 **OAuth 동의 화면**을 설정하고, **사용자 인증 정보 → OAuth 클라이언트 ID → 웹 애플리케이션**을 만듭니다.
+2. 승인된 리디렉션 URI에 `http://localhost:8501/oauth2callback`을 추가합니다. 배포한다면 실제 서비스 주소의 `/oauth2callback`도 추가합니다.
+3. `backend/.env`에 OAuth 클라이언트 ID를 넣습니다.
+
+   ```env
+   GOOGLE_OAUTH_CLIENT_ID=...apps.googleusercontent.com
+   ```
+
+4. `frontend/.streamlit/secrets.toml.example`을 `frontend/.streamlit/secrets.toml`으로 복사한 뒤, `client_id`, `client_secret`, `cookie_secret`을 입력합니다. `cookie_secret`은 충분히 긴 임의 문자열을 사용합니다.
+5. Supabase SQL Editor에서 [005_google_account_history.sql](backend/supabase/migrations/005_google_account_history.sql)을 실행합니다.
+
+로그인 후 새로 요청한 추천과 대화는 계정별로 저장되며, 다른 브라우저나 새 세션에서도 왼쪽 **대화 이력**에서 다시 열 수 있습니다. Google 로그인 ID 토큰은 짧은 유효기간이 있으므로 만료되면 다시 로그인하면 됩니다.
 
 ## 구현 순서 제안
 
@@ -139,21 +177,43 @@ cp .env.example .env
 6. Supabase에 검색 이력과 피드백을 저장한다.
 7. Analysis Agent를 LLM 또는 임베딩 기반으로 고도화하고, 점수·이유를 개선한다.
 
-## 로컬 실행 목표 명령어
+## 백엔드 실행
 
-구현이 진행되면 아래 명령을 기준으로 실행합니다.
+백엔드 구현을 완료했습니다. Python 3.11 이상과 [uv](https://docs.astral.sh/uv/)가 필요합니다.
 
 ```bash
-# backend
 cd backend
-uvicorn app.main:app --reload
-
-# frontend (별도 터미널)
-cd frontend
-streamlit run app.py
+uv sync --extra dev
+cp .env.example .env
+uv run uvicorn app.main:app --reload
 ```
 
-의존성 관리 방식(`requirements.txt`, `pyproject.toml` 등)과 Docker 구성은 기능 구현 단계에서 팀의 개발 환경에 맞춰 추가합니다.
+```bash
+# 별도 터미널: 상태 확인
+curl http://127.0.0.1:8000/health
+
+# YOUTUBE_API_KEY 설정 후 추천 요청
+curl -X POST http://127.0.0.1:8000/api/v1/recommendations \
+  -H 'Content-Type: application/json' \
+  -d '{"category":"테크·IT","detail_request":"FastAPI와 Supabase 로그인 구현","max_duration_minutes":30,"purpose":"practice"}'
+
+# 테스트
+cd backend && uv run pytest
+```
+
+## 프론트엔드 실행
+
+별도 터미널에서 실행합니다.
+
+```bash
+cd frontend
+python3 -m venv .venv
+.venv/bin/pip install -e .
+cp .env.example .env
+.venv/bin/streamlit run app.py
+```
+
+프론트엔드 `.env`에는 `BACKEND_URL`만 둡니다. YouTube·Supabase 비밀 키는 반드시 `backend/.env`에만 둡니다.
 
 ## 참고
 
