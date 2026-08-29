@@ -1,221 +1,227 @@
 # YouPick
 
-사용자가 **현재 입력한 조건**만을 기준으로 YouTube 영상을 찾아 추천하는 멀티 에이전트 AI 오케스트레이션 실습 프로젝트입니다. 기존 시청 기록이나 구독 목록 대신 카테고리, 상세 요청, 시청 가능 시간, 시청 목적을 조합해 영상을 선별하고 추천 이유를 제공합니다.
+현재 입력한 조건과 자연어 요청을 바탕으로 YouTube 영상을 추천하는 **멀티 에이전트 AI 오케스트레이션** 실습 프로젝트입니다. Python, FastAPI, Supabase(PostgreSQL), Redis, Streamlit으로 백엔드와 프런트엔드를 함께 구현했습니다.
 
-> 프로젝트 기획서: [YouPick 프로젝트 기획서](https://kyeongrak-choi.github.io/post.html?path=posts%2FEncore%2FProject%2FYouPick_%ED%94%84%EB%A1%9C%EC%A0%9D%ED%8A%B8_%EA%B8%B0%ED%9A%8D%EC%84%9C_%EC%B4%88%EC%95%88.md)
+> 기획서: [YouPick 프로젝트 기획서](https://kyeongrak-choi.github.io/post.html?path=posts%2FEncore%2FProject%2FYouPick_%ED%94%84%EB%A1%9C%EC%A0%9D%ED%8A%B8_%EA%B8%B0%ED%9A%8D%EC%84%9C_%EC%B4%88%EC%95%88.md)
 
-## 목표
+## 현재 구현 상태
 
-- YouTube의 기존 개인화 추천과 독립적으로, 한 번의 사용자 요청에 맞는 영상을 추천한다.
-- Shorts(기본값: 60초 이하)를 제외하고 시간 제한을 만족하는 영상만 남긴다.
-- 역할이 분리된 에이전트를 FastAPI 오케스트레이터가 순서대로 실행한다.
-- 같은 조건의 반복 요청은 Redis 캐시로 YouTube API 호출을 줄인다.
-- 사이드바에서 YouTube API의 앱 기준 예상 잔여 할당량을 확인한다.
-- 검색 이력과 피드백은 Supabase(PostgreSQL)에 저장해 이후 고도화에 활용한다.
+- 카테고리, 시청 목적, 시청 시간, 자연어 요청을 조합한 YouTube 영상 추천
+- `Search → Detail → Filter → Analysis → Ranking` 역할 분리 및 FastAPI 오케스트레이션
+- Shorts(60초 이하) 제외, 10·30·60·120분 또는 제한 없음 조건 지원
+- `이번 주`, `최근`, `최신` 등의 시간 표현을 인식해 최근 영상 우선 검색·정렬
+- 동일 요청 Redis 캐시로 YouTube API 호출 절감
+- 추천 순위 카드, 적합도, 추천 이유, YouTube 이동, 피드백 UI
+- Google 계정 로그인과 계정별 Supabase 대화 이력 저장·재열기
+- YouTube API 앱 기준 예상 잔여 쿼터 표시
 
 ## 기술 스택
 
-| 영역 | 선택 기술 | 역할 |
+| 영역 | 기술 | 역할 |
 | --- | --- | --- |
-| Backend / API | Python, FastAPI | 요청 검증, 추천 워크플로 오케스트레이션, REST API |
+| Backend | Python, FastAPI | API, 인증 토큰 검증, 추천 워크플로 |
 | Multi-agent | Python 서비스 계층 | 검색·상세조회·필터·분석·정렬 역할 분리 |
-| Frontend | Streamlit | 조건 입력, 추천 결과·이유·상태 표시 |
-| 영속 데이터 | Supabase (PostgreSQL) | 검색 이력, 사용자 피드백, 운영 데이터 |
-| 캐시 | Redis | 동일 조건 검색 결과 캐싱, API 쿼터 절감 |
-| 외부 API | YouTube Data API v3 | 후보 검색과 영상 상세 정보 수집 |
+| Frontend | Streamlit | 로그인, 채팅형 요청 UI, 추천·이력 화면 |
+| Database | Supabase / PostgreSQL | 요청, 추천 결과, 피드백, 계정별 대화 이력 |
+| Cache | Redis | 동일 요청 추천 결과 캐시, 쿼터 절감 |
+| External API | YouTube Data API v3 | 영상 검색과 상세 정보 조회 |
+| Auth | Google OIDC | Google 로그인, 계정 식별 |
 
-초기 구현에서는 새로운 에이전트 프레임워크를 바로 도입하지 않습니다. 각 에이전트를 Python 클래스 또는 함수로 명확히 나눈 뒤, FastAPI의 `RecommendationOrchestrator`가 실행 순서와 결과를 관리합니다. 이를 통해 멀티 에이전트의 역할 분담과 오케스트레이션을 직접 학습할 수 있습니다.
-
-## 추천 흐름
+## 추천 처리 흐름
 
 ```text
-Streamlit UI
+Streamlit (Google 로그인)
   → FastAPI /api/v1/recommendations
-    → Orchestrator Agent
-      → Search Agent       : YouTube search.list로 후보 검색
-      → Video Detail Agent : videos.list로 길이·태그·통계 조회
-      → Filter Agent       : Shorts·시간 제한 제외
-      → Analysis Agent     : 요청과 영상의 적합성·추천 이유 분석
-      → Ranking Agent      : 점수 계산 및 최종 정렬
-    → Redis Cache / Supabase 기록
-  → 추천 목록과 추천 이유 표시
+    → Google ID token 검증
+    → RecommendationOrchestrator
+       ├─ SearchAgent       : YouTube search.list
+       ├─ VideoDetailAgent  : YouTube videos.list
+       ├─ FilterAgent       : Shorts·시간 조건 필터링
+       ├─ AnalysisAgent     : 요청 키워드·최신성·목적 점수화
+       └─ RankingAgent      : 최종 순위 정렬
+    → Redis 캐시 / Supabase 이력 저장
+  → 추천 카드와 계정별 대화 이력 표시
 ```
 
 ## 프로젝트 구조
 
 ```text
 Youpick/
-├── backend/                         # FastAPI 서버와 추천 오케스트레이션
+├── backend/
 │   ├── app/
-│   │   ├── api/v1/                  # 라우터 (recommendations, health 등)
-│   │   ├── agents/                  # 역할별 에이전트와 오케스트레이터
-│   │   ├── core/                    # 설정, 보안, 로깅
-│   │   ├── db/                      # Supabase/PostgreSQL 연결 및 모델
-│   │   ├── repositories/            # 검색 이력·피드백 데이터 접근
-│   │   ├── schemas/                 # Pydantic 요청·응답 모델
-│   │   ├── services/                # YouTube, Redis, AI 분석 어댑터
-│   │   └── main.py                  # FastAPI 애플리케이션 진입점
-│   └── tests/                       # backend 단위·통합 테스트
-├── frontend/                        # Streamlit 사용자 화면
-│   ├── pages/                       # 검색 이력, 피드백 등 확장 화면
-│   ├── components/                  # 조건 폼, 결과 카드, 상태 표시 컴포넌트
-│   ├── services/                    # FastAPI 호출 클라이언트
-│   └── app.py                       # Streamlit 진입점
-├── docs/                            # API 명세, 에이전트 설계, 회고
-├── infra/                           # 로컬 Redis·DB 개발 환경 설정
-├── tests/                           # E2E/공통 테스트
-├── .env.example                     # 필요한 환경 변수 이름만 공유
-├── .gitignore
+│   │   ├── agents/recommendation.py    # 멀티 에이전트·오케스트레이터
+│   │   ├── api/v1/                     # 추천·피드백·이력·쿼터 API
+│   │   ├── repositories/history.py      # Supabase 저장·조회
+│   │   ├── services/                    # YouTube, Redis cache, quota
+│   │   └── main.py                      # FastAPI 진입점
+│   ├── supabase/migrations/             # Supabase SQL 마이그레이션
+│   ├── tests/                           # 백엔드 테스트
+│   └── .env.example
+├── frontend/
+│   ├── .streamlit/
+│   │   ├── config.toml                  # 다크 테마
+│   │   └── secrets.toml.example         # Google OIDC 설정 템플릿
+│   ├── components/recommendation_card.py
+│   ├── services/api_client.py
+│   ├── app.py                           # Streamlit 진입점
+│   └── .env.example
 └── README.md
 ```
 
-현재는 폴더 구조와 문서만 만든 상태입니다. 각 폴더의 `.gitkeep`은 빈 디렉터리도 Git에 유지하기 위한 파일이며, 기능 구현을 시작하면 실제 코드 파일로 대체합니다.
+## 사전 준비
 
-## MVP 범위
+- Python 3.11 이상
+- YouTube Data API v3 키
+- Supabase 프로젝트와 Secret key
+- Google OAuth 웹 애플리케이션 Client ID / Client secret
+- Redis는 선택 사항입니다. 미설정 시 메모리 캐시를 사용합니다.
 
-### 입력
+## 1. Supabase 설정
 
-- 카테고리: 과학, 테크·IT, 경제·주식 등
-- 상세 요청: 자연어 검색 문장
-- 시간 제한: 예) 10분, 30분, 60분 이내
-- 시청 목적: 빠른 요약, 개념 이해, 심층 분석, 실습
+Supabase Dashboard → **SQL Editor**에서 아래 SQL을 번호 순서대로 실행합니다.
 
-### 출력
+1. [001_initial_schema.sql](backend/supabase/migrations/001_initial_schema.sql)
+2. [002_feedback.sql](backend/supabase/migrations/002_feedback.sql)
+3. [003_allow_custom_purpose.sql](backend/supabase/migrations/003_allow_custom_purpose.sql)
+4. [004_allow_unlimited_viewing_time.sql](backend/supabase/migrations/004_allow_unlimited_viewing_time.sql)
+5. [005_google_account_history.sql](backend/supabase/migrations/005_google_account_history.sql)
 
-- 영상 제목, 채널명, 썸네일, 재생 시간, 업로드 날짜
-- 사용자 조건과 연결된 추천 이유
-- 정렬 점수 또는 적합도(개발용으로 먼저 제공)
-- 결과 캐시 여부와 에이전트 처리 상태(학습·디버깅용)
+## 2. Google 로그인 설정
 
-### 제외 범위
+Google Cloud Console → **Google 인증 플랫폼 → 클라이언트**에서 **웹 애플리케이션** OAuth 클라이언트를 만듭니다.
 
-- YouTube 로그인, 재생목록 조작, 구독 관리
-- 사용자별 장기 개인화 추천
-- Shorts 완전 판별: MVP에서는 `contentDetails.duration`이 60초 이하인 영상을 제외
+- 승인된 리디렉션 URI: `http://localhost:8501/oauth2callback`
+- 테스트 모드라면 **대상 → 테스트 사용자**에 로그인할 Google 계정을 추가합니다.
+- `Client ID`는 백엔드와 프런트엔드에 **동일한 값**을 사용합니다.
 
-## 에이전트 책임
+`redirect_uri_mismatch` 오류가 발생하면 Google Console의 리디렉션 URI가 위 주소와 한 글자까지 같은지 확인합니다. `127.0.0.1`이나 끝의 슬래시(`/`)는 사용하지 않습니다.
 
-| 에이전트 | 입력 | 출력 | 책임 |
-| --- | --- | --- | --- |
-| Orchestrator | 추천 요청 | 최종 추천 응답 | 실행 순서, 실패 처리, 상태 수집 |
-| Search Agent | 검색어·카테고리·시간 | 후보 영상 ID | `search.list` 호출과 1차 후보 수집 |
-| Video Detail Agent | 영상 ID 목록 | 영상 상세 목록 | `videos.list`로 길이·태그·통계 보강 |
-| Filter Agent | 영상 상세·시간 제한 | 필터링된 영상 | Shorts 및 시간 초과 영상 제외 |
-| Analysis Agent | 요청 조건·영상 정보 | 적합도·추천 이유 | 요청과 영상의 의미적 적합성 평가 |
-| Ranking Agent | 분석 결과 | 정렬된 추천 목록 | 적합도와 보조 지표를 조합해 순위 결정 |
+## 3. 환경 변수 설정
 
-## 데이터와 캐시 설계 초안
-
-- Redis 키 예시: `recommendations:{category}:{duration}:{purpose}:{request_hash}`
-- Redis 값: 최종 추천 결과와 생성 시각. TTL은 개발 초기에 30분으로 시작한다.
-- Supabase 테이블 후보:
-  - `search_requests`: 입력 조건, 요청 시각, 처리 시간, 캐시 히트 여부
-  - `recommendations`: 요청별 추천 영상과 순위, 점수, 추천 이유
-- `feedback`: 추천 결과에 대한 유용함 평가와 선택 이유
-- 비밀 값(YouTube API 키, Supabase 키)은 `.env`에만 저장하며 Git에 올리지 않는다.
-
-Supabase 영속화 스키마는 [001_initial_schema.sql](backend/supabase/migrations/001_initial_schema.sql)에 있습니다. Supabase SQL Editor에서 한 번 실행한 후 `backend/.env`에 `SUPABASE_URL`과 `SUPABASE_SECRET_KEY`를 설정하면, 추천 요청과 결과가 자동으로 저장됩니다. 기존 `SUPABASE_SERVICE_ROLE_KEY`도 호환되지만 새 프로젝트에서는 Secret key 사용을 권장합니다. 이 키는 백엔드에서만 사용하며 Streamlit 등 프론트엔드에는 절대 전달하지 않습니다.
-
-추천 결과의 유용함 평가는 `POST /api/v1/feedback`으로 보냅니다. 사용 전에 [002_feedback.sql](backend/supabase/migrations/002_feedback.sql)을 SQL Editor에서 실행해야 합니다.
-
-```json
-{
-  "recommendation_id": "추천 결과의 UUID",
-  "is_helpful": true,
-  "comment": "실습에 도움이 됐어요."
-}
-```
-
-## 환경 변수
-
-`backend/.env.example`을 복사해 `backend/.env`를 만든 후 실제 값을 입력합니다.
-
-```bash
-cp backend/.env.example backend/.env
-```
-
-| 변수 | 설명 |
-| --- | --- |
-| `YOUTUBE_API_KEY` | YouTube Data API v3 키 |
-| `YOUTUBE_DAILY_QUOTA_LIMIT` | 일일 할당량 기준값. 기본값은 10,000유닛 |
-| `GOOGLE_OAUTH_CLIENT_ID` | Google 로그인용 OAuth Client ID. Streamlit 설정과 같은 값 |
-| `SUPABASE_URL` | Supabase 프로젝트 URL |
-| `SUPABASE_KEY` | Supabase 서버용 키 |
-| `REDIS_URL` | Redis 연결 URL. 예: `redis://localhost:6379/0` |
-| `BACKEND_URL` | Streamlit이 호출할 FastAPI 주소 |
-
-`backend/.env`의 `CORS_ORIGINS`에는 브라우저에서 API를 호출할 프론트엔드 주소를 쉼표로 구분해 설정합니다. 로컬 Streamlit 기본 주소는 이미 예시에 포함되어 있습니다.
-
-### YouTube API 잔여 할당량
-
-YouTube Data API는 API 응답에 남은 일일 할당량을 직접 제공하지 않습니다. 따라서 YouPick은 앱이 발생시킨 `search.list` 호출은 100유닛, `videos.list` 호출은 1유닛으로 누적해 사이드바에 **예상 잔여량**을 표시합니다. Redis를 설정했다면 서버 재시작 뒤에도 같은 날의 사용량이 유지됩니다. Google Cloud Console, 다른 앱 또는 직접 실행한 호출은 포함되지 않으므로 Console의 실제 수치와 차이가 날 수 있습니다. 기준 일자는 YouTube의 일일 쿼터가 초기화되는 미국 태평양 시간입니다.
-
-### Google 로그인과 계정별 대화 이력
-
-YouPick은 Streamlit의 Google OIDC 로그인으로 받은 Google ID 토큰을 FastAPI가 검증하고, Google 계정의 고유 식별자(`sub`)로 Supabase 이력을 분리합니다. 비밀 값은 Git에 올리지 않습니다.
-
-1. Google Cloud Console의 **OAuth 동의 화면**을 설정하고, **사용자 인증 정보 → OAuth 클라이언트 ID → 웹 애플리케이션**을 만듭니다.
-2. 승인된 리디렉션 URI에 `http://localhost:8501/oauth2callback`을 추가합니다. 배포한다면 실제 서비스 주소의 `/oauth2callback`도 추가합니다.
-3. `backend/.env`에 OAuth 클라이언트 ID를 넣습니다.
-
-   ```env
-   GOOGLE_OAUTH_CLIENT_ID=...apps.googleusercontent.com
-   ```
-
-4. `frontend/.streamlit/secrets.toml.example`을 `frontend/.streamlit/secrets.toml`으로 복사한 뒤, `client_id`, `client_secret`, `cookie_secret`을 입력합니다. `cookie_secret`은 충분히 긴 임의 문자열을 사용합니다.
-5. Supabase SQL Editor에서 [005_google_account_history.sql](backend/supabase/migrations/005_google_account_history.sql)을 실행합니다.
-
-로그인 후 새로 요청한 추천과 대화는 계정별로 저장되며, 다른 브라우저나 새 세션에서도 왼쪽 **대화 이력**에서 다시 열 수 있습니다. Google 로그인 ID 토큰은 짧은 유효기간이 있으므로 만료되면 다시 로그인하면 됩니다.
-
-## 구현 순서 제안
-
-1. `schemas`와 `/health`, `/recommendations` API 계약을 먼저 정의한다.
-2. YouTube 검색·상세 조회 서비스를 만들고, 샘플 응답으로 단위 테스트를 작성한다.
-3. Filter Agent와 단순 키워드 기반 Ranking Agent를 구현한다.
-4. Orchestrator에서 각 에이전트를 연결하고 Redis 캐시를 추가한다.
-5. Streamlit에서 입력 폼과 추천 카드 화면을 만든다.
-6. Supabase에 검색 이력과 피드백을 저장한다.
-7. Analysis Agent를 LLM 또는 임베딩 기반으로 고도화하고, 점수·이유를 개선한다.
-
-## 백엔드 실행
-
-백엔드 구현을 완료했습니다. Python 3.11 이상과 [uv](https://docs.astral.sh/uv/)가 필요합니다.
+### Backend
 
 ```bash
 cd backend
-uv sync --extra dev
 cp .env.example .env
-uv run uvicorn app.main:app --reload
 ```
 
-```bash
-# 별도 터미널: 상태 확인
-curl http://127.0.0.1:8000/health
+`backend/.env`에 실제 값을 입력합니다. 이 파일은 Git에 올리지 않습니다.
 
-# YOUTUBE_API_KEY 설정 후 추천 요청
-curl -X POST http://127.0.0.1:8000/api/v1/recommendations \
-  -H 'Content-Type: application/json' \
-  -d '{"category":"테크·IT","detail_request":"FastAPI와 Supabase 로그인 구현","max_duration_minutes":30,"purpose":"practice"}'
-
-# 테스트
-cd backend && uv run pytest
+```env
+YOUTUBE_API_KEY=...
+SUPABASE_URL=https://....supabase.co
+SUPABASE_SECRET_KEY=...
+REDIS_URL=redis://localhost:6379/0
+GOOGLE_OAUTH_CLIENT_ID=....apps.googleusercontent.com
 ```
 
-## 프론트엔드 실행
+주요 선택 설정:
 
-별도 터미널에서 실행합니다.
+| 변수 | 기본값 | 설명 |
+| --- | --- | --- |
+| `YOUTUBE_CANDIDATE_LIMIT` | `20` | 검색할 영상 후보 수 |
+| `RECOMMENDATION_CACHE_TTL_SECONDS` | `1800` | 캐시 유지 시간(초) |
+| `YOUTUBE_DAILY_QUOTA_LIMIT` | `10000` | 예상 잔여 쿼터 계산 기준 |
+
+### Frontend
 
 ```bash
 cd frontend
-python3 -m venv .venv
-.venv/bin/pip install -e .
 cp .env.example .env
-.venv/bin/streamlit run app.py
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
 ```
 
-프론트엔드 `.env`에는 `BACKEND_URL`만 둡니다. YouTube·Supabase 비밀 키는 반드시 `backend/.env`에만 둡니다.
+`frontend/.env`에는 백엔드 주소만 둡니다.
+
+```env
+BACKEND_URL=http://127.0.0.1:8000
+```
+
+`frontend/.streamlit/secrets.toml`에 Google OAuth 정보를 입력합니다.
+
+```toml
+[auth]
+redirect_uri = "http://localhost:8501/oauth2callback"
+cookie_secret = "충분히_긴_임의의_문자열"
+expose_tokens = ["id"]
+
+[auth.google]
+client_id = "...apps.googleusercontent.com"
+client_secret = "Google_Cloud에서_발급한_Client_secret"
+server_metadata_url = "https://accounts.google.com/.well-known/openid-configuration"
+```
+
+`secrets.toml`, `.env`, API 키, OAuth Client secret은 절대 Git에 올리지 않습니다.
+
+## 서버 실행
+
+처음 한 번만 각 가상환경과 의존성을 준비합니다.
+
+```bash
+# backend
+cd backend
+python3 -m venv .venv
+./.venv/bin/pip install -e '.[dev]'
+
+# frontend
+cd ../frontend
+python3 -m venv .venv
+./.venv/bin/pip install -e .
+```
+
+### 1) FastAPI 실행
+
+첫 번째 터미널에서 실행합니다.
+
+```bash
+cd /Users/krchoi/Workspace/python/Youpick/backend
+./.venv/bin/uvicorn app.main:app --reload
+```
+
+- API 상태 확인: <http://127.0.0.1:8000/health>
+- API 문서: <http://127.0.0.1:8000/docs>
+
+### 2) Streamlit 실행
+
+두 번째 터미널에서 실행합니다.
+
+```bash
+cd /Users/krchoi/Workspace/python/Youpick/frontend
+./.venv/bin/streamlit run app.py
+```
+
+브라우저에서 **<http://localhost:8501>**로 접속하고, `Google 계정으로 로그인` 버튼을 누릅니다. OAuth 관련 설정을 바꾼 뒤에는 Streamlit을 `Ctrl + C`로 종료한 후 다시 실행해야 합니다.
+
+## 테스트
+
+```bash
+cd /Users/krchoi/Workspace/python/Youpick/backend
+./.venv/bin/pytest
+```
+
+## YouTube API 쿼터 표시 기준
+
+YouTube API는 남은 일일 쿼터를 응답으로 직접 반환하지 않습니다. 따라서 YouPick은 앱이 발생시킨 호출을 기준으로 예상치를 계산합니다.
+
+- `search.list`: 100유닛
+- `videos.list`: 1유닛
+- 같은 요청이 Redis 캐시에 있으면 YouTube API를 호출하지 않아 유닛을 차감하지 않음
+- Google Console, 다른 프로그램, 직접 호출한 API 사용량은 포함하지 않음
+- 기준 일자는 미국 태평양 시간이며, Redis 미설정 시 서버 재시작 뒤 사용량은 초기화될 수 있음
+
+## 문제 해결
+
+| 증상 | 확인 방법 |
+| --- | --- |
+| `streamlit: command not found` | `frontend`에서 `./.venv/bin/streamlit run app.py`로 실행 |
+| `StreamlitAuthError` | `frontend/.streamlit/secrets.toml`의 `[auth]`, `[auth.google]` 섹션과 TOML 따옴표 문법 확인 |
+| `401 invalid_client` | frontend의 Client ID·Secret이 Google Console의 같은 OAuth 클라이언트 값인지 확인 |
+| `400 redirect_uri_mismatch` | Google Console에 `http://localhost:8501/oauth2callback`을 정확히 등록하고 localhost로 접속 |
+| 프런트엔드에서 백엔드 연결 실패 | FastAPI가 8000 포트에서 실행 중인지, `frontend/.env`의 `BACKEND_URL` 확인 |
+| 잔여 쿼터가 Console과 다름 | 앱이 자체 추정한 값이며 Console/다른 앱의 호출은 포함하지 않음 |
 
 ## 참고
 
 - [YouTube Data API - search.list](https://developers.google.com/youtube/v3/docs/search/list)
 - [YouTube Data API - Quota Calculator](https://developers.google.com/youtube/v3/determine_quota_cost)
+- [Google OAuth 웹 서버 애플리케이션](https://developers.google.com/identity/protocols/oauth2/web-server)
