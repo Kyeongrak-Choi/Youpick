@@ -87,7 +87,7 @@ class RecommendationHistoryRepository:
                 "search_requests(id,category,detail_request,max_duration_minutes,purpose,"
                 "candidate_count,filtered_count,cached,created_at,"
                 "recommendations(id,video_id,title,channel_name,thumbnail_url,duration_seconds,"
-                "published_at,view_count,tags,relevance_score,recommendation_reason,rank))"
+                "published_at,view_count,tags,relevance_score,recommendation_reason,short_review,rank))"
             ),
             "order": "updated_at.desc",
         }
@@ -130,5 +130,6 @@ class RecommendationHistoryRepository:
             "tags": item["tags"],
             "relevance_score": item["relevance_score"],
             "recommendation_reason": item["recommendation_reason"],
+            "short_review": item.get("short_review"),
             "rank": rank,
         }

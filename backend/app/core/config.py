@@ -30,7 +30,7 @@ def get_settings() -> Settings:
         youtube_api_key=getenv("YOUTUBE_API_KEY") or None,
         redis_url=getenv("REDIS_URL") or None,
         cache_ttl_seconds=int(getenv("RECOMMENDATION_CACHE_TTL_SECONDS", "1800")),
-        candidate_limit=int(getenv("YOUTUBE_CANDIDATE_LIMIT", "20")),
+        candidate_limit=int(getenv("YOUTUBE_CANDIDATE_LIMIT", "50")),
         youtube_daily_quota_limit=int(getenv("YOUTUBE_DAILY_QUOTA_LIMIT", "10000")),
         google_oauth_client_id=getenv("GOOGLE_OAUTH_CLIENT_ID") or None,
         cors_origins=[

@@ -99,13 +99,16 @@ def account_conversation_to_chat(conversation: dict) -> dict:
     }
 
 
-def load_account_history() -> None:
+def load_account_history() -> bool:
     try:
         rows = api_client().conversations(google_id_token())
         st.session_state.conversation_history = [account_conversation_to_chat(row) for row in rows]
+        st.session_state.history_load_error = None
+        return True
     except YouPickApiError as exc:
         st.session_state.conversation_history = []
-        st.warning(f"계정 대화 이력을 불러오지 못했어요: {exc}")
+        st.session_state.history_load_error = str(exc)
+        return False
 
 
 def render_youtube_quota() -> None:
@@ -116,8 +119,8 @@ def render_youtube_quota() -> None:
         limit = quota["daily_limit"]
         used = quota["used_units"]
         ratio = remaining / limit if limit else 0
-        st.metric("YouTube API 잔여량", f"{remaining:,} / {limit:,} 유닛", f"오늘 {used:,} 유닛 사용")
-        st.progress(ratio, text="앱 호출 기준 예상 잔여량 · 매일 미국 태평양 자정 초기화")
+        st.metric("프로젝트 API 잔여량", f"{remaining:,} / {limit:,} 유닛", f"오늘 {used:,} 유닛 사용")
+        st.progress(ratio, text="오늘의 API 사용량 · 매일 미국 태평양 자정 초기화")
     except YouPickApiError:
         st.caption("YouTube API 잔여량을 확인하려면 백엔드를 실행해 주세요.")
 
@@ -141,20 +144,30 @@ def open_archived_chat(chat: dict) -> None:
     st.session_state.messages = deepcopy(chat["messages"])
     st.session_state.opened_archive_id = chat["id"]
     st.session_state.conversation_id = chat["id"]
+    result_ids = [
+        message.get("id")
+        for message in st.session_state.messages
+        if message.get("kind") == "result" and message.get("id")
+    ]
+    # When reopening an old chat, focus the newest recommendation's TOP 1 card
+    # instead of Streamlit's bottom chat composer.
+    st.session_state.scroll_target_id = result_ids[-1] if result_ids else None
     st.rerun()
 
 
-def submit_feedback(video: dict, helpful: bool) -> None:
+def submit_feedback(video: dict, helpful: bool) -> bool:
     if not video.get("recommendation_id"):
         st.info("이전 캐시 결과는 피드백을 연결할 수 없습니다. 다시 요청해 주세요.")
-        return
+        return False
     try:
         api_client().send_feedback(
             {"recommendation_id": video["recommendation_id"], "is_helpful": helpful}, google_id_token()
         )
-        st.toast("피드백을 저장했어요. 다음 추천 개선에 활용할게요.", icon="✓")
+        st.toast("피드백을 저장했어요. 다음 추천 개선에 활용할게요.", icon="✅")
+        return True
     except YouPickApiError as exc:
         st.error(f"피드백 저장에 실패했어요: {exc}")
+        return False
 
 
 def request_recommendation(prompt: str, category: str, purpose: str, duration_label: str) -> None:
@@ -219,7 +232,7 @@ def render_result(result: dict, focus: bool = False) -> None:
                   if (Math.abs(offset) > 2) container.scrollTop += offset;
                 });
               };
-              // Streamlit focuses chat_input after a rerun, so repeat after its own scroll completes.
+              // Repeat after Streamlit finishes laying out the reopened conversation.
               [100, 450, 900, 1400].forEach((delay) => {
                 window.setTimeout(moveToTopRecommendation, delay);
               });
@@ -228,10 +241,23 @@ def render_result(result: dict, focus: bool = False) -> None:
             height=0,
         )
         st.session_state.scroll_target_id = None
-    summary_left, summary_center, summary_right = st.columns(3)
-    summary_left.metric("추천 결과", f"{len(result['recommendations'])}개")
-    summary_center.metric("검토한 후보", f"{result['candidate_count']}개")
-    summary_right.metric("검색 방식", "캐시" if result["cached"] else "새로 검색")
+    st.markdown(
+        f"""
+        <section class="recommendation-summary">
+          <div class="summary-card summary-card-primary">
+            <span class="summary-icon">✦</span>
+            <div><span class="summary-label">최종 추천</span><strong>{len(result['recommendations'])}<small>개</small></strong></div>
+            <span class="summary-note">지금 바로 볼 영상</span>
+          </div>
+          <div class="summary-card summary-card-filtered">
+            <span class="summary-icon">✓</span>
+            <div><span class="summary-label">조건 통과</span><strong>{result['filtered_count']}<small>개</small></strong></div>
+            <span class="summary-note">시간·길이 조건 반영</span>
+          </div>
+        </section>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if not result["recommendations"]:
         st.info("조건에 맞는 영상이 없습니다. 시간 제한을 늘리거나 요청을 조금 더 넓게 입력해 보세요.")
@@ -239,15 +265,46 @@ def render_result(result: dict, focus: bool = False) -> None:
 
     st.caption("아래 결과는 시청 기록이 아닌, 이번 대화의 요청과 설정만 반영합니다.")
     for rank, video in enumerate(result["recommendations"], start=1):
-        with st.container(border=True):
-            render_recommendation_card(video, rank)
-            helpful, unhelpful, _ = st.columns([1, 1, 5])
+        def render_video_actions(item: dict, item_rank: int) -> None:
+            st.link_button(
+                "YouTube에서 보기",
+                f"https://www.youtube.com/watch?v={item['video_id']}",
+                icon=":material/play_circle:",
+                type="secondary",
+                use_container_width=True,
+            )
+            helpful, unhelpful = st.columns(2)
+            feedback_key = str(item.get("recommendation_id", item["video_id"]))
+            selected_feedback = st.session_state.feedback_choices.get(feedback_key)
             with helpful:
-                if st.button("도움됐어요", key=f"helpful-{video['recommendation_id']}-{rank}"):
-                    submit_feedback(video, True)
+                if st.button(
+                    "도움됐어요 · 선택됨" if selected_feedback is True else "도움됐어요",
+                    key=f"helpful-{item['recommendation_id']}-{item_rank}",
+                    icon=":material/check_circle:" if selected_feedback is True else ":material/thumb_up:",
+                    help="이 추천이 도움이 되었어요",
+                    use_container_width=True,
+                    type="primary" if selected_feedback is True else "secondary",
+                    disabled=selected_feedback is not None,
+                ):
+                    if submit_feedback(item, True):
+                        st.session_state.feedback_choices[feedback_key] = True
+                        st.rerun()
             with unhelpful:
-                if st.button("아쉬워요", key=f"not-helpful-{video['recommendation_id']}-{rank}"):
-                    submit_feedback(video, False)
+                if st.button(
+                    "아쉬워요 · 선택됨" if selected_feedback is False else "아쉬워요",
+                    key=f"not-helpful-{item['recommendation_id']}-{item_rank}",
+                    icon=":material/cancel:" if selected_feedback is False else ":material/thumb_down:",
+                    help="이 추천이 아쉬웠어요",
+                    use_container_width=True,
+                    type="primary" if selected_feedback is False else "secondary",
+                    disabled=selected_feedback is not None,
+                ):
+                    if submit_feedback(item, False):
+                        st.session_state.feedback_choices[feedback_key] = False
+                        st.rerun()
+
+        with st.container(border=True):
+            render_recommendation_card(video, rank, render_video_actions)
 
 
 def render_sidebar_history() -> None:
@@ -295,6 +352,10 @@ if "opened_archive_id" not in st.session_state:
     st.session_state.opened_archive_id = None
 if "scroll_target_id" not in st.session_state:
     st.session_state.scroll_target_id = None
+if "history_load_error" not in st.session_state:
+    st.session_state.history_load_error = None
+if "feedback_choices" not in st.session_state:
+    st.session_state.feedback_choices = {}
 
 st.markdown(
     """
@@ -324,6 +385,32 @@ st.markdown(
       .rank-bronze { background: linear-gradient(90deg, #48291b, #2d1d19); border-color: #be734c; }
       .rank-default { background: linear-gradient(90deg, #202653, #171d39); border-color: #626cc3; }
       .recommendation-anchor { scroll-margin-top: 1rem; }
+      .recommendation-summary {
+        display: grid; gap: 0.85rem; grid-template-columns: repeat(2, minmax(0, 1fr));
+        margin: 0.4rem 0 1.05rem;
+      }
+      .summary-card {
+        align-items: center; border: 1px solid; border-radius: 15px; display: flex;
+        gap: 0.75rem; min-height: 88px; padding: 0.85rem 1rem; position: relative;
+      }
+      .summary-card-primary { background: linear-gradient(125deg, #312e81, #172554); border-color: #6366f1; }
+      .summary-card-filtered { background: linear-gradient(125deg, #123c39, #102a2c); border-color: #2dd4bf; }
+      .summary-icon {
+        align-items: center; border-radius: 11px; display: flex; font-size: 1.3rem;
+        height: 2.5rem; justify-content: center; width: 2.5rem;
+      }
+      .summary-card-primary .summary-icon { background: #4f46e5; color: #f5f3ff; }
+      .summary-card-filtered .summary-icon { background: #0f766e; color: #ecfeff; }
+      .summary-label { color: #cbd5e1; display: block; font-size: .77rem; font-weight: 700; letter-spacing: .03em; }
+      .summary-card strong { color: #fff; display: block; font-size: 1.75rem; letter-spacing: -.04em; line-height: 1.12; }
+      .summary-card strong small { color: #cbd5e1; font-size: .9rem; margin-left: .2rem; }
+      .summary-note { color: #94a3b8; font-size: .72rem; margin-left: auto; text-align: right; }
+      .thumbnail-action-spacer { height: 10rem; }
+      @media (max-width: 640px) {
+        .recommendation-summary { grid-template-columns: 1fr; }
+        .summary-card { min-height: 76px; }
+        .thumbnail-action-spacer { height: 1rem; }
+      }
       button[kind="primary"] {
         background: linear-gradient(135deg, #7c3aed, #2563eb) !important;
         border: 1px solid #a78bfa !important; border-radius: 12px !important;
@@ -331,6 +418,13 @@ st.markdown(
         font-weight: 700 !important; letter-spacing: .02em; min-height: 3rem;
       }
       button[kind="primary"]:hover { filter: brightness(1.14); transform: translateY(-1px); }
+      [data-testid="stLinkButton"] a {
+        background: linear-gradient(135deg, #ef4444, #b91c1c) !important;
+        border: 1px solid #f87171 !important; border-radius: 10px !important;
+        box-shadow: 0 6px 16px rgba(239, 68, 68, .22); color: #fff !important;
+        font-weight: 700 !important;
+      }
+      [data-testid="stLinkButton"] a:hover { filter: brightness(1.12); transform: translateY(-1px); }
     </style>
     """,
     unsafe_allow_html=True,
@@ -360,6 +454,11 @@ with st.sidebar:
     st.caption("대화의 맥락보다, 지금의 목적을 우선합니다.")
     st.divider()
     st.subheader("대화 이력")
+    if st.session_state.history_load_error:
+        st.warning("계정 대화 이력을 불러오지 못했어요.")
+        if st.button("대화 이력 다시 불러오기", use_container_width=True):
+            load_account_history()
+            st.rerun()
     render_sidebar_history()
     st.divider()
     st.subheader("API 할당량")
@@ -475,6 +574,16 @@ else:
                 st.markdown("조건에 맞는 영상을 찾았어요.")
                 render_result(message["content"], focus=message.get("id") == st.session_state.scroll_target_id)
 
-    prompt = st.chat_input("예: 이번 주 미국 증시 흐름을 요약해 주는 영상을 찾아줘")
-    if prompt:
+    # st.chat_input automatically scrolls itself into view after every rerun.
+    # A normal form keeps reopened history focused on the selected TOP 1 card.
+    with st.container(border=True):
+        with st.form("chat-request-form", clear_on_submit=True):
+            prompt = st.text_area(
+                "추가 영상 요청",
+                placeholder="예: 이번 주 미국 증시 흐름을 요약해 주는 영상을 찾아줘",
+                label_visibility="collapsed",
+                height=82,
+            )
+            submitted = st.form_submit_button("✦  보내기", type="primary", use_container_width=True)
+    if submitted and prompt:
         request_recommendation(prompt, category, purpose, duration_label)

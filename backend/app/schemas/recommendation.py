@@ -31,6 +31,7 @@ class RecommendedVideo(BaseModel):
     tags: list[str] = Field(default_factory=list)
     relevance_score: float = Field(ge=0, le=100)
     recommendation_reason: str
+    short_review: str | None = None
 
 
 class RecommendationResponse(BaseModel):

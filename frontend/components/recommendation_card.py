@@ -19,10 +19,19 @@ def rank_badge(rank: int) -> tuple[str, str, str]:
     return "▶", f"TOP {rank}", "rank-default"
 
 
-def render_recommendation_card(video: dict, rank: int) -> None:
+def fallback_short_review(video: dict) -> str:
+    """Keep older, pre-review history entries visually complete."""
+    title = video["title"].replace("\n", " ").strip()
+    return f"‘{title[:32].rstrip(' ,.') }’ 주제를 다루는 영상입니다."
+
+
+def render_recommendation_card(video: dict, rank: int, render_actions=None) -> None:
     left, right = st.columns([1, 2])
     with left:
         st.image(video["thumbnail_url"], use_container_width=True)
+        if render_actions:
+            st.markdown('<div class="thumbnail-action-spacer"></div>', unsafe_allow_html=True)
+            render_actions(video, rank)
     with right:
         medal, rank_label, badge_style = rank_badge(rank)
         score = int(video["relevance_score"])
@@ -42,4 +51,6 @@ def render_recommendation_card(video: dict, rank: int) -> None:
         published_at = datetime.fromisoformat(video["published_at"].replace("Z", "+00:00"))
         st.caption(f"업로드: {published_at.date().isoformat()}")
         st.write(video["recommendation_reason"])
-        st.link_button("YouTube에서 보기", f"https://www.youtube.com/watch?v={video['video_id']}")
+        short_review = video.get("short_review") or fallback_short_review(video)
+        st.caption("짧은 리뷰 · 공개 설명에서 핵심 문장 추출")
+        st.info(short_review, icon="💡")

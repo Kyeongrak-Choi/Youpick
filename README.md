@@ -85,6 +85,8 @@ Supabase Dashboard → **SQL Editor**에서 아래 SQL을 번호 순서대로 �
 3. [003_allow_custom_purpose.sql](backend/supabase/migrations/003_allow_custom_purpose.sql)
 4. [004_allow_unlimited_viewing_time.sql](backend/supabase/migrations/004_allow_unlimited_viewing_time.sql)
 5. [005_google_account_history.sql](backend/supabase/migrations/005_google_account_history.sql)
+6. [006_youtube_quota_usage.sql](backend/supabase/migrations/006_youtube_quota_usage.sql)
+7. [007_recommendation_short_review.sql](backend/supabase/migrations/007_recommendation_short_review.sql)
 
 ## 2. Google 로그인 설정
 
@@ -119,7 +121,7 @@ GOOGLE_OAUTH_CLIENT_ID=....apps.googleusercontent.com
 
 | 변수 | 기본값 | 설명 |
 | --- | --- | --- |
-| `YOUTUBE_CANDIDATE_LIMIT` | `20` | 검색할 영상 후보 수 |
+| `YOUTUBE_CANDIDATE_LIMIT` | `50` | 검색할 영상 후보 수. `search.list` 한 번에 가능한 최대치 |
 | `RECOMMENDATION_CACHE_TTL_SECONDS` | `1800` | 캐시 유지 시간(초) |
 | `YOUTUBE_DAILY_QUOTA_LIMIT` | `10000` | 예상 잔여 쿼터 계산 기준 |
 
@@ -201,13 +203,13 @@ cd /Users/krchoi/Workspace/python/Youpick/backend
 
 ## YouTube API 쿼터 표시 기준
 
-YouTube API는 남은 일일 쿼터를 응답으로 직접 반환하지 않습니다. 따라서 YouPick은 앱이 발생시킨 호출을 기준으로 예상치를 계산합니다.
+YouTube API는 남은 일일 쿼터를 응답으로 직접 반환하지 않습니다. 따라서 YouPick은 앱이 발생시킨 호출을 기준으로 예상치를 계산해 Supabase의 `youtube_api_quota_daily` 테이블에 저장합니다. 이 값은 **사용자별이 아니라 Google Cloud 프로젝트 전체**의 값이므로, 어느 계정으로 로그인해도 같은 사용량과 잔여량이 표시됩니다.
 
 - `search.list`: 100유닛
 - `videos.list`: 1유닛
 - 같은 요청이 Redis 캐시에 있으면 YouTube API를 호출하지 않아 유닛을 차감하지 않음
 - Google Console, 다른 프로그램, 직접 호출한 API 사용량은 포함하지 않음
-- 기준 일자는 미국 태평양 시간이며, Redis 미설정 시 서버 재시작 뒤 사용량은 초기화될 수 있음
+- 기준 일자는 미국 태평양 시간이며, Supabase에 저장돼 서버 재시작이나 다른 로그인 사용자에게도 유지됨
 
 ## 문제 해결
 

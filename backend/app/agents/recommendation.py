@@ -91,6 +91,93 @@ class AnalysisAgent:
         "취미·휴식": "취미를 즐기거나 편안하게 시청하려는 목적",
     }
 
+    @staticmethod
+    def _matched_terms(keywords: set[str], text: str) -> list[str]:
+        normalized = text.lower()
+        return sorted((word for word in keywords if word in normalized), key=len, reverse=True)
+
+    @staticmethod
+    def _duration_text(seconds: int) -> str:
+        minutes, remaining_seconds = divmod(seconds, 60)
+        return f"{minutes}분 {remaining_seconds}초" if remaining_seconds else f"{minutes}분"
+
+    @staticmethod
+    def _view_count_text(view_count: int | None) -> str | None:
+        if view_count is None:
+            return None
+        if view_count >= 10_000:
+            return f"조회수 약 {view_count / 10_000:.1f}만 회"
+        return f"조회수 {view_count:,}회"
+
+    @staticmethod
+    def _short_review_for(video: YouTubeVideo, keywords: set[str]) -> str:
+        """Select the most relevant public-description sentence and keep it review-length."""
+        description = re.sub(r"https?://\S+", "", video.description)
+        raw_sentences = re.split(r"(?:\r?\n)+|(?<=[.!?])\s+", description)
+        filler_words = ("안녕하세요", "구독", "좋아요", "알림", "광고", "문의", "인스타", "카카오")
+        candidates = []
+        for sentence in raw_sentences:
+            sentence = re.sub(r"\s+", " ", sentence).strip(" -•#\t")
+            if len(sentence) < 12 or any(word in sentence.lower() for word in filler_words):
+                continue
+            # Descriptions often contain line-wrapped fragments such as "...이해하고".
+            # Use only a sentence that appears complete; never cut a raw fragment mid-sentence.
+            if not re.search(r"(?:다|요|니다|습니다|죠|까요)[.!?]?$", sentence):
+                continue
+            matched = len(AnalysisAgent._matched_terms(keywords, sentence))
+            # Prefer request-related sentences around 50 characters over a long description block.
+            score = matched * 100 - abs(len(sentence) - 50)
+            candidates.append((score, sentence))
+
+        if candidates:
+            _, review = max(candidates, key=lambda item: item[0])
+            if len(review) <= 65:
+                return review
+
+        title = re.sub(r"\[[^\]]+\]", "", video.title).strip()
+        title = title[:29].rstrip(" ,.")
+        return f"{title}를 중심으로 핵심 흐름을 정리하는 영상입니다."
+
+    def _reason_for(
+        self, request: RecommendationRequest, video: YouTubeVideo, keywords: set[str], now: datetime,
+        freshness_window: timedelta | None,
+    ) -> str:
+        title_terms = self._matched_terms(keywords, video.title)
+        tag_terms = self._matched_terms(keywords, " ".join(video.tags))
+        description_terms = self._matched_terms(keywords, video.description)
+        if title_terms:
+            evidence = "제목에서 ‘" + "’, ‘".join(title_terms[:3]) + "’을 직접 다룹니다"
+        elif tag_terms:
+            evidence = "태그에 ‘" + "’, ‘".join(tag_terms[:3]) + "’이 포함돼 있습니다"
+        elif description_terms:
+            evidence = "설명에서 ‘" + "’, ‘".join(description_terms[:3]) + "’ 관련 내용을 확인했습니다"
+        else:
+            evidence = f"‘{video.title[:44]}’이라는 주제로 요청과 가까운 내용을 다룹니다"
+
+        published_date = video.published_at.astimezone(UTC).strftime("%Y.%m.%d")
+        age_days = max(0, int((now - video.published_at).total_seconds() // 86_400))
+        if freshness_window:
+            if age_days == 0:
+                freshness = "오늘 업로드된 최신 영상입니다"
+            elif age_days == 1:
+                freshness = "어제 업로드된 최신 영상입니다"
+            else:
+                freshness = f"{age_days}일 전({published_date}) 업로드돼 최신성 조건에 맞습니다"
+        else:
+            freshness = f"업로드일은 {published_date}입니다"
+
+        duration = self._duration_text(video.duration_seconds)
+        if request.max_duration_minutes:
+            time_fit = f"{duration} 길이로 설정한 {request.max_duration_minutes}분 안에 시청할 수 있습니다"
+        else:
+            time_fit = f"{duration} 길이의 영상입니다"
+        popularity = self._view_count_text(video.view_count)
+        purpose = self.purpose_text.get(request.purpose, f"{request.purpose} 목적")
+        parts = [f"{purpose}에 적합합니다", evidence, freshness, time_fit]
+        if popularity:
+            parts.append(popularity)
+        return ". ".join(parts) + "."
+
     def run(self, request: RecommendationRequest, videos: list[YouTubeVideo]) -> list[RecommendedVideo]:
         keywords = {word.lower() for word in f"{request.category} {request.detail_request}".split() if len(word) > 1}
         window = temporal_window(request.detail_request)
@@ -112,16 +199,13 @@ class AnalysisAgent:
                 age_seconds = max(0.0, (now - video.published_at).total_seconds())
                 freshness_bonus = max(0.0, 25 * (1 - age_seconds / window.total_seconds()))
             score = min(99.9, round(40 + matches * 4 + duration_bonus + freshness_bonus, 1))
-            minutes = max(1, round(video.duration_seconds / 60))
-            purpose_description = self.purpose_text.get(request.purpose, f"{request.purpose}을 위한 목적")
-            freshness_reason = " 최근 업로드된 영상이라 " if window else " "
             results.append(RecommendedVideo(
                 video_id=video.video_id, title=video.title, channel_name=video.channel_name,
                 thumbnail_url=video.thumbnail_url, duration_seconds=video.duration_seconds,
                 published_at=video.published_at, view_count=video.view_count, tags=video.tags,
                 relevance_score=score,
-                recommendation_reason=(f"{purpose_description}에 맞고{freshness_reason}요청 키워드 {matches}개가 "
-                                       f"제목·설명·태그에서 확인되었습니다. {minutes}분 길이로 시청 시간 안에 볼 수 있습니다."),
+                recommendation_reason=self._reason_for(request, video, keywords, now, window),
+                short_review=self._short_review_for(video, keywords),
             ))
         return results
 
@@ -141,7 +225,8 @@ class RecommendationOrchestrator:
 
     async def recommend(self, request: RecommendationRequest, user_id: str | None = None,
                         user_email: str | None = None, conversation_id: UUID | None = None) -> RecommendationResponse:
-        key = self.cache.key_for(request.model_dump(mode="json"))
+        # Bump this cache namespace when the response-generation logic changes.
+        key = self.cache.key_for({**request.model_dump(mode="json"), "recommendation_reason_version": 7})
         cached = await self.cache.get(key)
         if cached:
             response = RecommendationResponse.model_validate({**cached, "cached": True})

@@ -13,7 +13,9 @@ from app.repositories.history import RecommendationHistoryRepository
 @lru_cache
 def get_youtube_quota_tracker() -> YouTubeQuotaTracker:
     settings = get_settings()
-    return YouTubeQuotaTracker(settings.redis_url, settings.youtube_daily_quota_limit)
+    return YouTubeQuotaTracker(
+        settings.supabase_url, settings.supabase_secret_key, settings.youtube_daily_quota_limit
+    )
 
 
 @lru_cache
