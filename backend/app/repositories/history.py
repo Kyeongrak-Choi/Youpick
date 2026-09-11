@@ -100,6 +100,19 @@ class RecommendationHistoryRepository:
             logger.warning("Unable to load YouPick conversation history: %s", exc)
             return []
 
+    async def dashboard_overview(self) -> dict[str, Any]:
+        """Load project-wide aggregate metrics calculated inside Supabase."""
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                response = await client.post(
+                    f"{self._base_url}/rpc/get_youpick_dashboard", headers=self._headers, json={}
+                )
+                response.raise_for_status()
+                return response.json()
+        except (httpx.HTTPError, TypeError) as exc:
+            logger.warning("Unable to load YouPick dashboard overview: %s", exc)
+            raise RuntimeError("대시보드 데이터를 불러올 수 없습니다.") from exc
+
     async def save_feedback(self, feedback: FeedbackCreate) -> FeedbackResponse:
         """Persist one anonymous usefulness rating for a shown recommendation."""
         try:
@@ -113,6 +126,29 @@ class RecommendationHistoryRepository:
                 return FeedbackResponse.model_validate(response.json()[0])
         except (httpx.HTTPError, KeyError, IndexError, TypeError) as exc:
             raise RuntimeError("Unable to save recommendation feedback") from exc
+
+    async def feedback_choices(self, recommendation_ids: list[UUID]) -> dict[str, bool]:
+        """Return the most recent saved choice for each displayed recommendation."""
+        if not recommendation_ids:
+            return {}
+        params = {
+            "select": "recommendation_id,is_helpful,created_at",
+            "recommendation_id": f"in.({','.join(str(item) for item in recommendation_ids)})",
+            "order": "created_at.desc",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                response = await client.get(f"{self._base_url}/feedback", headers=self._headers, params=params)
+                response.raise_for_status()
+                choices: dict[str, bool] = {}
+                for row in response.json():
+                    # The rows are newest-first. Keep the first response when older
+                    # duplicate feedback exists from before choices were restored.
+                    choices.setdefault(row["recommendation_id"], row["is_helpful"])
+                return choices
+        except (httpx.HTTPError, KeyError, TypeError) as exc:
+            logger.warning("Unable to load recommendation feedback choices: %s", exc)
+            raise RuntimeError("저장한 피드백을 불러올 수 없습니다.") from exc
 
     @staticmethod
     def _recommendation_row(

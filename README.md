@@ -87,6 +87,7 @@ Supabase Dashboard → **SQL Editor**에서 아래 SQL을 번호 순서대로 �
 5. [005_google_account_history.sql](backend/supabase/migrations/005_google_account_history.sql)
 6. [006_youtube_quota_usage.sql](backend/supabase/migrations/006_youtube_quota_usage.sql)
 7. [007_recommendation_short_review.sql](backend/supabase/migrations/007_recommendation_short_review.sql)
+8. [008_dashboard_overview.sql](backend/supabase/migrations/008_dashboard_overview.sql)
 
 ## 2. Google 로그인 설정
 

@@ -1,5 +1,6 @@
 import os
 from copy import deepcopy
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from dotenv import load_dotenv
@@ -75,6 +76,16 @@ def google_id_token() -> str:
     return st.user.tokens["id"]
 
 
+def load_feedback_choices(recommendation_ids: list[str]) -> dict[str, bool]:
+    """Load saved choices, including during a hot reload with an older API client."""
+    client = api_client()
+    fetch_choices = getattr(client, "feedback_choices", None)
+    if callable(fetch_choices):
+        return fetch_choices(recommendation_ids, google_id_token())
+    query = urlencode({"recommendation_ids": recommendation_ids}, doseq=True)
+    return client._request("GET", f"/api/v1/feedback/choices?{query}", None, google_id_token())
+
+
 def account_conversation_to_chat(conversation: dict) -> dict:
     messages = [{"role": "assistant", "kind": "text", "content": WELCOME_MESSAGE}]
     requests = sorted(conversation.get("search_requests", []), key=lambda item: item.get("created_at", ""))
@@ -103,6 +114,21 @@ def load_account_history() -> bool:
     try:
         rows = api_client().conversations(google_id_token())
         st.session_state.conversation_history = [account_conversation_to_chat(row) for row in rows]
+        recommendation_ids = [
+            str(video["recommendation_id"])
+            for chat in st.session_state.conversation_history
+            for message in chat["messages"]
+            if message.get("kind") == "result"
+            for video in message["content"]["recommendations"]
+            if video.get("recommendation_id")
+        ]
+        try:
+            st.session_state.feedback_choices.update(
+                load_feedback_choices(recommendation_ids)
+            )
+        except YouPickApiError:
+            # Conversation history remains usable if restoring UI-only state fails.
+            pass
         st.session_state.history_load_error = None
         return True
     except YouPickApiError as exc:
@@ -278,9 +304,9 @@ def render_result(result: dict, focus: bool = False) -> None:
             selected_feedback = st.session_state.feedback_choices.get(feedback_key)
             with helpful:
                 if st.button(
-                    "도움됐어요 · 선택됨" if selected_feedback is True else "도움됐어요",
+                    "도움됐어요",
                     key=f"helpful-{item['recommendation_id']}-{item_rank}",
-                    icon=":material/check_circle:" if selected_feedback is True else ":material/thumb_up:",
+                    icon=":material/thumb_up:",
                     help="이 추천이 도움이 되었어요",
                     use_container_width=True,
                     type="primary" if selected_feedback is True else "secondary",
@@ -291,9 +317,9 @@ def render_result(result: dict, focus: bool = False) -> None:
                         st.rerun()
             with unhelpful:
                 if st.button(
-                    "아쉬워요 · 선택됨" if selected_feedback is False else "아쉬워요",
+                    "아쉬워요",
                     key=f"not-helpful-{item['recommendation_id']}-{item_rank}",
-                    icon=":material/cancel:" if selected_feedback is False else ":material/thumb_down:",
+                    icon=":material/thumb_down:",
                     help="이 추천이 아쉬웠어요",
                     use_container_width=True,
                     type="primary" if selected_feedback is False else "secondary",
@@ -425,6 +451,12 @@ st.markdown(
         font-weight: 700 !important;
       }
       [data-testid="stLinkButton"] a:hover { filter: brightness(1.12); transform: translateY(-1px); }
+      [data-testid="stPageLink"] a {
+        align-items: center; background: #172554; border: 1px solid #4f46e5; border-radius: 10px;
+        color: #e0e7ff !important; display: flex; font-weight: 700; justify-content: center;
+        min-height: 2.5rem; padding: .45rem .7rem; text-decoration: none;
+      }
+      [data-testid="stPageLink"] a:hover { background: #312e81; border-color: #818cf8; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -446,7 +478,12 @@ if not getattr(st.user, "is_logged_in", False):
 
 if st.session_state.get("account_subject") != st.user.sub:
     st.session_state.account_subject = st.user.sub
+    st.session_state.feedback_choices = {}
     load_account_history()
+
+_, dashboard_menu = st.columns([6, 2])
+with dashboard_menu:
+    st.page_link("pages/1_대시보드.py", label="운영 대시보드", icon="📊", use_container_width=True)
 
 with st.sidebar:
     st.title("YouPick")

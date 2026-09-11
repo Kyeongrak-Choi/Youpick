@@ -1,6 +1,7 @@
 """HTTP client for the YouPick FastAPI service."""
 
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 
@@ -19,11 +20,18 @@ class YouPickApiClient:
     def send_feedback(self, payload: dict[str, Any], id_token: str) -> dict[str, Any]:
         return self._request("POST", "/api/v1/feedback", payload, id_token)
 
+    def feedback_choices(self, recommendation_ids: list[str], id_token: str) -> dict[str, bool]:
+        query = urlencode({"recommendation_ids": recommendation_ids}, doseq=True)
+        return self._request("GET", f"/api/v1/feedback/choices?{query}", None, id_token)
+
     def youtube_quota(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/quota/youtube", None)
 
     def conversations(self, id_token: str) -> list[dict[str, Any]]:
         return self._request("GET", "/api/v1/history/conversations", None, id_token)
+
+    def dashboard_overview(self, id_token: str) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/dashboard/overview", None, id_token)
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None,
                  id_token: str | None = None) -> Any:
